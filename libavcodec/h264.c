@@ -659,7 +659,8 @@ av_cold int ff_h264_decode_init(AVCodecContext *avctx)
     if (!avctx->has_b_frames)
         h->low_delay = 1;
 
-    h->dump_frames_cnt = 0;
+    h->irdeto_dump_frames_cnt = 0;
+    h->irdeto_dump_ctx = 0;
 
     ff_h264_decode_init_vlc();
 
@@ -1771,30 +1772,26 @@ static AVFrame *alloc_picture(enum AVPixelFormat pix_fmt, int width, int height)
     return picture;
 }
 
-static int dump_irdeto_pic2(const AVFrame * pic, const char * filename)
+static AVCodecContext * irdeto_open_encoder(int width, int height)
 {
     int ret;
+    AVCodecContext * ctx;
     AVCodec * codec = 0;
-    AVCodecContext * ctx = 0;
-    AVPacket pkt = {0};
-    const AVFrame * converted_pic = pic;
-
-    av_init_packet(&pkt);
 
     codec = avcodec_find_encoder(AV_CODEC_ID_BMP);
     if(!codec)
     {
-        return AVERROR_UNKNOWN;
+        return 0;
     }
 
     ctx = avcodec_alloc_context3(codec);
     if(!ctx)
     {
-        return AVERROR(ENOMEM);
+        return 0;
     }
 
-    ctx->width = pic->width;
-    ctx->height = pic->height;
+    ctx->width = width;
+    ctx->height = height;
 
     ctx->pix_fmt = AV_PIX_FMT_RGB32;
 
@@ -1802,8 +1799,21 @@ static int dump_irdeto_pic2(const AVFrame * pic, const char * filename)
     if(ret)
     {
         av_log(0, AV_LOG_ERROR, "failed to open codec context\n");
-        return AVERROR_UNKNOWN;
+        avcodec_free_context(&ctx);
+        return 0;
     }
+
+    return ctx;
+}
+
+static int irdeto_dump_pic2(AVCodecContext * ctx, const AVFrame * pic, const char * filename)
+{
+    int ret;
+
+    AVPacket pkt = {0};
+    const AVFrame * converted_pic = pic;
+
+    av_init_packet(&pkt);
 
     int got_packet_ptr;
 
@@ -1831,7 +1841,7 @@ static int dump_irdeto_pic2(const AVFrame * pic, const char * filename)
             return AVERROR_UNKNOWN;
         }
 
-        ret = sws_scale(sws_ctx, pic->data, pic->linesize,
+        ret = sws_scale(sws_ctx, (const uint8_t * const *) pic->data, pic->linesize,
                   0, pic->height, converted_pic->data, converted_pic->linesize);
 
         if (!ret)
@@ -1860,17 +1870,27 @@ static int dump_irdeto_pic2(const AVFrame * pic, const char * filename)
     }
     fclose(fd);
 
-    avcodec_close(ctx);
-
     return 0;
 }
 
-static int dump_irdeto_pic(H264Context *h, AVFrame *pic)
+static int irdeto_dump_pic(AVCodecContext *avctx, AVFrame *pic, int stream_index)
 {
-    char filename[256];
-    sprintf(filename, "%d_%d.jpeg", 0, h->dump_frames_cnt);
+    H264Context *h = avctx->priv_data;
 
-    return dump_irdeto_pic2(pic, filename);
+    if(h->irdeto_dump_ctx == NULL)
+    {
+        h->irdeto_dump_ctx = irdeto_open_encoder(pic->width, pic->height);
+
+        if(!h->irdeto_dump_ctx)
+        {
+            av_log(0, AV_LOG_ERROR, "failed to open irdeto dump encoder\n");
+            return AVERROR_UNKNOWN;
+        }
+    }
+    char filename[256];
+    sprintf(filename, "%d_%d.bmp", stream_index, h->irdeto_dump_frames_cnt);
+
+    return irdeto_dump_pic2(h->irdeto_dump_ctx, pic, filename);
 }
 
 static int h264_decode_frame(AVCodecContext *avctx, void *data,
@@ -2020,10 +2040,10 @@ static int h264_decode_frame(AVCodecContext *avctx, void *data,
 
     ff_h264_unref_picture(h, &h->last_pic_for_ec);
 
-    if(*got_frame && h->dump_frames_cnt < h->dump_frames_no)
+    if(*got_frame && h->irdeto_dump_frames_cnt < h->irdeto_dump_frames_no)
     {
-        dump_irdeto_pic(h, pict);
-        h->dump_frames_cnt += 1;
+        irdeto_dump_pic(avctx, pict, avpkt->stream_index);
+        h->irdeto_dump_frames_cnt += 1;
     }
 
     return get_consumed_bytes(buf_index, buf_size);
@@ -2066,6 +2086,8 @@ static av_cold int h264_decode_end(AVCodecContext *avctx)
     av_frame_free(&h->cur_pic.f);
     ff_h264_unref_picture(h, &h->last_pic_for_ec);
     av_frame_free(&h->last_pic_for_ec.f);
+    avcodec_close(h->irdeto_dump_ctx);
+    avcodec_free_context(&h->irdeto_dump_ctx);
 
     return 0;
 }
@@ -2076,7 +2098,7 @@ static const AVOption h264_options[] = {
     {"is_avc", "is avc", offsetof(H264Context, is_avc), FF_OPT_TYPE_INT, {.i64 = 0}, 0, 1, 0},
     {"nal_length_size", "nal_length_size", offsetof(H264Context, nal_length_size), FF_OPT_TYPE_INT, {.i64 = 0}, 0, 4, 0},
     { "enable_er", "Enable error resilience on damaged frames (unsafe)", OFFSET(enable_er), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, 1, VD },
-    { "irdeto", "number of frames need to dumped into JPEG format", OFFSET(dump_frames_no), AV_OPT_TYPE_INT, { .i64 = 0 }, -1, INT_MAX, VD },
+    { "irdeto", "number of frames need to dumped into JPEG format", OFFSET(irdeto_dump_frames_no), AV_OPT_TYPE_INT, { .i64 = 0 }, -1, INT_MAX, VD },
     { NULL },
 };
 
