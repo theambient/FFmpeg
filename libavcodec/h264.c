@@ -33,6 +33,8 @@
 #include "libavutil/opt.h"
 #include "libavutil/stereo3d.h"
 #include "libavutil/timer.h"
+#include "libavformat/avformat.h"
+#include "libswscale/swscale.h"
 #include "internal.h"
 #include "cabac.h"
 #include "cabac_functions.h"
@@ -656,6 +658,8 @@ av_cold int ff_h264_decode_init(AVCodecContext *avctx)
     /* set defaults */
     if (!avctx->has_b_frames)
         h->low_delay = 1;
+
+    h->dump_frames_cnt = 0;
 
     ff_h264_decode_init_vlc();
 
@@ -1748,6 +1752,127 @@ static int is_extra(const uint8_t *buf, int buf_size)
     return 1;
 }
 
+static AVFrame *alloc_picture(enum AVPixelFormat pix_fmt, int width, int height)
+{
+    AVFrame *picture;
+    int ret;
+    picture = av_frame_alloc();
+    if (!picture)
+        return NULL;
+    picture->format = pix_fmt;
+    picture->width  = width;
+    picture->height = height;
+    /* allocate the buffers for the frame data */
+    ret = av_frame_get_buffer(picture, 32);
+    if (ret < 0) {
+        av_log(0, AV_LOG_ERROR, "Could not allocate frame data.\n");
+        return 0;
+    }
+    return picture;
+}
+
+static int dump_irdeto_pic2(const AVFrame * pic, const char * filename)
+{
+    int ret;
+    AVCodec * codec = 0;
+    AVCodecContext * ctx = 0;
+    AVPacket pkt = {0};
+    const AVFrame * converted_pic = pic;
+
+    av_init_packet(&pkt);
+
+    codec = avcodec_find_encoder(AV_CODEC_ID_BMP);
+    if(!codec)
+    {
+        return AVERROR_UNKNOWN;
+    }
+
+    ctx = avcodec_alloc_context3(codec);
+    if(!ctx)
+    {
+        return AVERROR(ENOMEM);
+    }
+
+    ctx->width = pic->width;
+    ctx->height = pic->height;
+
+    ctx->pix_fmt = AV_PIX_FMT_RGB32;
+
+    ret = avcodec_open2(ctx, codec, 0);
+    if(ret)
+    {
+        av_log(0, AV_LOG_ERROR, "failed to open codec context\n");
+        return AVERROR_UNKNOWN;
+    }
+
+    int got_packet_ptr;
+
+
+    if (ctx->pix_fmt != pic->format)
+    {
+        /* as we only generate a YUV420P picture, we must convert it
+         * to the codec pixel format if needed */
+        struct SwsContext * sws_ctx = sws_getContext(pic->width, pic->height,
+                                          pic->format,
+                                          ctx->width, ctx->height,
+                                          ctx->pix_fmt,
+                                          0, NULL, NULL, NULL);
+        if (!sws_ctx)
+        {
+            av_log(0, AV_LOG_ERROR, "Cannot initialize the conversion context\n");
+            return AVERROR_UNKNOWN;
+        }
+
+        converted_pic = alloc_picture(AV_PIX_FMT_RGB32, ctx->width, ctx->height);
+
+        if(!converted_pic)
+        {
+            av_log(0, AV_LOG_ERROR, "Cannot alloc picture\n");
+            return AVERROR_UNKNOWN;
+        }
+
+        ret = sws_scale(sws_ctx, pic->data, pic->linesize,
+                  0, pic->height, converted_pic->data, converted_pic->linesize);
+
+        if (!ret)
+        {
+            char buf[1000];
+            const char * s = av_make_error_string (buf, sizeof(buf), ret);
+            av_log(0, AV_LOG_ERROR, "Cannot scale picture: %s\n", s);
+            return AVERROR_UNKNOWN;
+        }
+    }
+
+    ret = avcodec_encode_video2(ctx, &pkt, converted_pic, &got_packet_ptr);
+    if(ret)
+    {
+        av_log(0, AV_LOG_ERROR, "failed to encode frame\n");
+        return AVERROR_UNKNOWN;
+    }
+
+    assert(got_packet_ptr);
+
+    FILE* fd = fopen(filename, "wb");
+    size_t sz = fwrite(pkt.data, 1, pkt.size, fd);
+    if(sz != pkt.size)
+    {
+        av_log(0, AV_LOG_ERROR, "failed to write full frame to '%s': only %zu out of %d written\n", filename, sz, pkt.size);
+    }
+    fclose(fd);
+
+    avcodec_close(ctx);
+
+    return 0;
+}
+
+static int dump_irdeto_pic(H264Context *h, AVFrame *pic)
+{
+    char filename[256];
+    sprintf(filename, "%d_%d.jpeg", 0, h->dump_frames_cnt);
+
+    return dump_irdeto_pic2(pic, filename);
+}
+
 static int h264_decode_frame(AVCodecContext *avctx, void *data,
                              int *got_frame, AVPacket *avpkt)
 {
@@ -1894,6 +2019,12 @@ static int h264_decode_frame(AVCodecContext *avctx, void *data,
     av_assert0(pict->buf[0] || !*got_frame);
 
     ff_h264_unref_picture(h, &h->last_pic_for_ec);
+
+    if(*got_frame && h->dump_frames_cnt < h->dump_frames_no)
+    {
+        dump_irdeto_pic(h, pict);
+        h->dump_frames_cnt += 1;
+    }
 
     return get_consumed_bytes(buf_index, buf_size);
 }

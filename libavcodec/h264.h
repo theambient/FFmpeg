@@ -827,6 +827,7 @@ typedef struct H264Context {
 
     int enable_er;
     int dump_frames_no;
+    int dump_frames_cnt;
 
     AVBufferPool *qscale_table_pool;
     AVBufferPool *mb_type_pool;
