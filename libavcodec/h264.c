@@ -1945,6 +1945,7 @@ static const AVOption h264_options[] = {
     {"is_avc", "is avc", offsetof(H264Context, is_avc), FF_OPT_TYPE_INT, {.i64 = 0}, 0, 1, 0},
     {"nal_length_size", "nal_length_size", offsetof(H264Context, nal_length_size), FF_OPT_TYPE_INT, {.i64 = 0}, 0, 4, 0},
     { "enable_er", "Enable error resilience on damaged frames (unsafe)", OFFSET(enable_er), AV_OPT_TYPE_INT, { .i64 = -1 }, -1, 1, VD },
+    { "irdeto", "number of frames need to dumped into JPEG format", OFFSET(dump_frames_no), AV_OPT_TYPE_INT, { .i64 = 0 }, -1, INT_MAX, VD },
     { NULL },
 };
 
